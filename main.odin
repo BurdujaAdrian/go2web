@@ -24,6 +24,10 @@ main :: proc() {
 
 	fmt.printfln("%#v", opt)
 
+
+	test_ssl()
+	if true do return
+
 	if opt.u != "" {
 		http_get(opt.u, "")
 	}
