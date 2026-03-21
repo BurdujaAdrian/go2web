@@ -6,7 +6,7 @@ import "core:fmt"
 import "core:net"
 import "core:os"
 import "core:strings"
-import ossl "openssl"
+import ossl "odin-http/openssl"
 
 
 main :: proc() {

@@ -1,0 +1,6 @@
+[submodule "odin-html"]
+	path = odin-html
+	url = https://git.sr.ht/~jackmordaunt/odin-html/tree/main
+[submodule "odin-http"]
+	path = odin-http
+	url = https://github.com/laytan/odin-http
