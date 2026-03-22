@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:net"
 import "core:os"
 import "core:strings"
+import html "odin-html"
 import ossl "odin-http/openssl"
 
 
@@ -29,6 +30,7 @@ main :: proc() {
 	https :: "https://"
 	http :: "http://"
 	is_https := true
+
 
 	if opt.u != "" {
 		url := opt.u
@@ -56,14 +58,22 @@ main :: proc() {
 		fmt.println(hostname)
 		fmt.println(endpoint)
 
-		https_get(hostname, endpoint)
+		response: string = https_get(hostname, endpoint)
+		doc := html.parse(response)
+		fmt.println(response)
+
+		// TODO: iterate the doc elements
+
 	} else if opt.s != "" {
 		// html based search engine api
 		hostname := "html.duckduckgo.com"
 		endpoint := fmt.aprintf("html/?q=%s", opt.s)
 
-		https_get(hostname, endpoint)
+		response: string = https_get(hostname, endpoint)
+		fmt.println(response)
 
+		doc := html.parse(response)
+		fmt.println(response)
 	}
 
 
@@ -71,7 +81,7 @@ main :: proc() {
 
 buff: [1024 * 1024]u8
 
-https_get :: proc(hostname, endpoint: string) {
+https_get :: proc(hostname, endpoint: string) -> (response: string) {
 
 	host: net.Host = {
 		hostname = hostname,
@@ -111,14 +121,13 @@ https_get :: proc(hostname, endpoint: string) {
 
 		to_write -= int(ret)
 	}
-	@(static) response: [1024 * 1024]u8
 
-	ossl.SSL_read(ssl, raw_data(response[:]), len(response))
+	response_size := ossl.SSL_read(ssl, raw_data(response[:]), len(buff))
 
-	fmt.printfln("%s", response[:])
+	return transmute(string)buff[:response_size]
 }
 
-http_get :: proc(hostname: string, endpoint: string) {
+http_get :: proc(hostname: string, endpoint: string) -> string {
 
 	host: net.Host = {
 		hostname = hostname,
@@ -144,5 +153,5 @@ http_get :: proc(hostname: string, endpoint: string) {
 	if recv_err != nil {fmt.panicf("recv error: %v", recv_err)}
 	if n <= 0 {panic("got nothing from request")}
 
-	fmt.printfln("%s", buff[:n])
+	return transmute(string)buff[:n]
 }
