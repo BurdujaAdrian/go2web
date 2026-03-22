@@ -12,6 +12,7 @@ import ossl "odin-http/openssl"
 
 main :: proc() {
 
+
 	Options :: struct {
 		u: string `args:"pos=0" usage:"makes an HTTP request to the specified URL and print the response"`,
 		s: string ` usage:"makes an HTTP request to search the term using your favorite search engine and print top 10 results"`,
@@ -29,12 +30,12 @@ main :: proc() {
 
 	https :: "https://"
 	http :: "http://"
-	is_https := true
 
 
 	if opt.u != "" {
 		url := opt.u
 		hostname: string
+		is_https := true
 
 		if url[:len(https)] == https {
 			is_https = true
@@ -47,20 +48,22 @@ main :: proc() {
 			hostname = url
 		}
 
-		endpoint_n := strings.index(url, "/")
+		endpoint_n := strings.index(hostname, "/")
 		endpoint: string
 		if endpoint_n == -1 {
 			endpoint = ""
 		} else {
-			endpoint = url[endpoint_n + 1:]
-			hostname = url[:endpoint_n]
+			endpoint = hostname[endpoint_n + 1:]
+			hostname = hostname[:endpoint_n]
 		}
 		fmt.println(hostname)
 		fmt.println(endpoint)
 
-		response: string = https_get(hostname, endpoint)
+		response: string
+		if is_https do response = https_get(hostname, endpoint)
+		else do response = http_get(hostname, endpoint)
 		doc := html.parse(response)
-		fmt.println(response)
+		fmt.println("Got response: ", response)
 
 		// TODO: iterate the doc elements
 
@@ -88,7 +91,7 @@ https_get :: proc(hostname, endpoint: string) -> (response: string) {
 		port     = 443,
 	}
 
-	fmt.println("Dialing tcp")
+	fmt.println("Dialing tcp at ", host)
 	socket, dial_err := net.dial_tcp_from_host(host)
 	if dial_err != nil {fmt.panicf("dial error: %v", dial_err)}
 
@@ -98,6 +101,8 @@ https_get :: proc(hostname, endpoint: string) -> (response: string) {
 		host.hostname,
 	)
 
+	fmt.printfln("Sending tcp request:\n%s", request)
+
 	fmt.println("Setting up tls connection")
 	method := ossl.TLS_client_method()
 	ctx := ossl.SSL_CTX_new(method)
@@ -106,6 +111,7 @@ https_get :: proc(hostname, endpoint: string) -> (response: string) {
 	chostname := strings.clone_to_cstring(hostname)
 	ossl.SSL_set_tlsext_host_name(ssl, chostname)
 
+	fmt.println("Connecting to ssl")
 	switch ossl.SSL_connect(ssl) {
 	case 2:
 		fmt.panicf("ssl error: Controlled shutdown")
@@ -116,13 +122,14 @@ https_get :: proc(hostname, endpoint: string) -> (response: string) {
 
 	to_write := len(request)
 	for to_write > 0 {
+		fmt.println("writing to ssl")
 		ret := ossl.SSL_write(ssl, raw_data(request), c.int(to_write))
 		if ret <= 0 {fmt.panicf("ssl error: write failed")}
 
 		to_write -= int(ret)
 	}
 
-	response_size := ossl.SSL_read(ssl, raw_data(response[:]), len(buff))
+	response_size := ossl.SSL_read(ssl, raw_data(buff[:]), len(buff))
 
 	return transmute(string)buff[:response_size]
 }
@@ -134,7 +141,7 @@ http_get :: proc(hostname: string, endpoint: string) -> string {
 		port     = 80,
 	}
 
-	fmt.println("Dialing tcp")
+	fmt.println("Dialing tcp at ", host)
 	socket, dial_err := net.dial_tcp_from_host(host)
 	if dial_err != nil {fmt.panicf("dial error: %v", dial_err)}
 
