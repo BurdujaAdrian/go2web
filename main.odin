@@ -10,9 +10,9 @@ import html "odin-html"
 import ossl "odin-http/openssl"
 
 page: string = #load("./hello.html")
+test: string = #load("./test2.html")
 
 main :: proc() {
-
 
 	Options :: struct {
 		u: string `args:"pos=0" usage:"makes an HTTP request to the specified URL and print the response"`,
@@ -36,6 +36,7 @@ main :: proc() {
 
 	if opt.u != "" {
 		//#url based request
+
 		url := opt.u
 		hostname: string
 		is_https := true
@@ -65,24 +66,25 @@ main :: proc() {
 		if is_https do response = https_get(hostname, endpoint)
 		else do response = http_get(hostname, endpoint)
 
+		body := strings.split(response, "\r\n\r\n")[1]
+		response_parse(body)
 
 	} else if opt.s != "" {
 		//#search on duckduckgo
-		// html based search engine api
+
 		hostname := "html.duckduckgo.com"
 		endpoint := fmt.aprintf("html/?q=%s", opt.s)
 
 		response = https_get(hostname, endpoint)
 
+		// html based search engine api
 		search_result_parse(response)
 	}
-
 
 }
 
 search_result_parse :: proc(body: string) {
 
-	//#html search result parsing
 	doc := html.parse(body)
 
 	// fmt.println("node iterator from doc")
@@ -134,6 +136,159 @@ search_result_parse :: proc(body: string) {
 		case html.Node_Text:
 		}
 	}
+}
+
+
+display_inner_text_nodes :: proc(
+	doc_iter: ^html.Node_Iterator,
+	parent: html.Node_Tag,
+	nested := false, // if this function is called on a node who's children were not yet added to the stack
+) {
+
+	for item in parent.children {
+		if !nested {
+			pop_safe(&doc_iter.stack)
+		}
+
+		switch v in item {
+		case html.Node_Text:
+			text := strings.trim_space(v.text)
+			if text != "" do fmt.print(text)
+		case html.Node_Tag:
+			switch v.name {
+			// text nodes
+			case "b", "i":
+				fmt.print(" ")
+				display_inner_text_nodes(doc_iter, v, true)
+				fmt.print(" ")
+			// link
+			case "a":
+				display_link_node(doc_iter, v, true)
+
+			case "br":
+				fmt.println("")
+			case:
+				fmt.panicf(
+					"Unhandled child tag in inner_text_node: %v \n parrent tag: %v\n parrent children:%v",
+					v.name,
+					parent.name,
+					parent.children,
+				)
+			}
+		}
+	}
+}
+
+display_link_node :: proc(
+	doc_iter: ^html.Node_Iterator,
+	v: html.Node_Tag,
+	nested := false, // if this function is called on a node who's children were not yet added to the stack
+) {
+	fmt.print("(")
+	display_inner_text_nodes(doc_iter, v, nested)
+	fmt.print(")")
+	for attr in v.attributes {
+		// TODO: handle relative links and nofallow as well
+		if attr.name == "href" {fmt.print("[", attr.value, "]", sep = "")}
+	}
+}
+
+response_parse :: proc(body: string) {
+	doc := html.parse(body)
+
+	doc_iter := html.node_iterator_from_document(doc)
+
+	for node in html.node_iterator_depth_first(&doc_iter) {
+		switch v in node {
+		case html.Node_Tag:
+			switch v.name {
+			case "title":
+				fmt.print("Title: ")
+				display_inner_text_nodes(&doc_iter, v)
+
+				fmt.println()
+			case "h":
+				/*"h1", "h2", "h3", "h4", "h5" are all parsed as h*/
+				fmt.print("\n\n# ")
+				display_inner_text_nodes(&doc_iter, v)
+			case "p":
+				fmt.println()
+				display_inner_text_nodes(&doc_iter, v)
+			case "a":
+				display_link_node(&doc_iter, v)
+			case "b":
+				display_inner_text_nodes(&doc_iter, v)
+
+			case "img":
+				for attr in v.attributes {
+					if attr.name == "name" {
+						fmt.print("img:", attr.value)
+					}
+				}
+			case "ul":
+				fmt.println("TABLE:")
+				// fmt.printfln("%#v", v.children)
+				for child in v.children {
+					switch child_v in child {
+					case html.Node_Tag:
+						if child_v.name == "li" {
+							fmt.print("- ")
+							display_inner_text_nodes(&doc_iter, child_v)
+							fmt.println()
+							continue
+						}
+						fmt.panicf(
+							"Didn't expect tags besides <li> within a <ul>, got %v instead",
+							child_v.name,
+						)
+
+					case html.Node_Text:
+						// remove the redundant text node
+						pop_safe(&doc_iter.stack)
+					}
+
+				}
+			case "ol":
+				fmt.println("List:")
+				// fmt.printfln("%#v", v.children)
+				for child, i in v.children {
+					switch child_v in child {
+					case html.Node_Tag:
+						if child_v.name == "li" {
+							fmt.print(i + 1)
+							display_inner_text_nodes(&doc_iter, child_v)
+							fmt.println()
+							continue
+						}
+						fmt.panicf(
+							"Didn't expect tags besides <li> within a <ul>, got %v instead",
+							child_v.name,
+						)
+
+					case html.Node_Text:
+						// remove the redundant text node
+						pop_safe(&doc_iter.stack)
+					}
+
+				}
+
+			// tags to remove inner children from
+			case "script", "style", "noscript":
+				for _ in v.children {pop_safe(&doc_iter.stack)}
+			case "div":
+				fmt.print(" ")
+			case:
+			// ignore
+			// fmt.println("ignored tag:", v.name)
+			}
+
+		case html.Node_Text:
+			text := strings.trim_space(v.text)
+			if text != "" do fmt.print(text)
+		}
+
+	}
+
 }
 
 buff: [1024 * 1024]u8
