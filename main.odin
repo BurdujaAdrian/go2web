@@ -5,10 +5,12 @@ import "core:c"
 import "core:compress/gzip"
 import "core:flags"
 import "core:fmt"
+import "core:hash"
 import "core:net"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import "core:time"
 import html "odin-html"
 import ossl "odin-http/openssl"
 
@@ -46,21 +48,27 @@ main :: proc() {
 	flags.register_flag_checker(checker)
 	flags.parse_or_exit(&opt, os.args, style)
 
-
 	https :: "https://"
 	http :: "http://"
 
 
-	response: string
-
 	if opt.u != "" {
+		//loading cache
+		files, files_err := os.read_all_directory_by_path("./cache/u", context.allocator)
+		if files_err != nil {
+			fmt.panicf("Failed to load cached files: %v", files_err)
+		}
+		if check_cache(opt.u, files) {return}
+
 		//#url based request
 
 		url := opt.u
 		hostname: string
 		is_https := true
+		response: string
 		header: string
 		body: string
+
 
 		outer: for {
 			if url[:len(https)] == https {
@@ -124,15 +132,30 @@ main :: proc() {
 
 		print("Decoding...", header)
 		body = content_decoding(header, body)
-		response_parse(body)
+		output := response_parse(body)
+		fmt.println(output)
+
+
+		cache_string: string = fmt.aprintf("cache/u/%x", hash.crc64_xz(transmute([]u8)opt.u))
+		err := os.write_entire_file_from_string(cache_string, output)
+		if err != nil {
+			fmt.panicf("Failed to cache output: %v", err)
+		}
 
 	} else if opt.s != "" {
+		//loading cache
+		files, files_err := os.read_all_directory_by_path("./cache/s", context.allocator)
+		if files_err != nil {
+			fmt.panicf("Failed to load cached files: %v", files_err)
+		}
+		if check_cache(opt.s, files) {return}
+
 		//#search on duckduckgo
 
 		hostname := "html.duckduckgo.com"
 		endpoint := fmt.aprintf("html/?q=%s", opt.s)
 
-		response = https_get(hostname, endpoint)
+		response := https_get(hostname, endpoint)
 
 		// html based search engine api
 		parts := strings.split(response, "\r\n\r\n")
@@ -141,9 +164,40 @@ main :: proc() {
 
 		print("Decoding...", header)
 		body = content_decoding(header, body)
-		search_result_parse(body)
+		output := search_result_parse(body)
+		fmt.println(output)
+
+		file_string: string = fmt.aprintf("cache/s/%x", hash.crc64_xz(transmute([]u8)opt.s))
+		err := os.write_entire_file_from_string(file_string, output)
+		if err != nil {
+			fmt.panicf("Failed to cache output: %v", err)
+		}
 	}
 
+}
+
+
+check_cache :: proc(entry: string, files: []os.File_Info) -> (hit: bool) {
+	hashed := fmt.aprintf("%x", hash.crc64_xz(transmute([]u8)entry))
+
+	for file in files {
+		if file.name == hashed {
+			time_diff := time.diff(file.modification_time, time.now())
+			// cache hit
+			if time.duration_seconds(time_diff) < 10 {
+				file_data, err := os.read_entire_file_from_path(file.fullpath, context.allocator)
+				if err != nil {
+					fmt.panicf("Failed to read cached file %v: %v", file.name, err)
+				}
+				print("Cache hit")
+				fmt.printfln("%s", file_data)
+
+				return true
+			}
+		}
+	}
+
+	return
 }
 
 content_decoding :: proc(header, body: string) -> string {
@@ -230,9 +284,10 @@ content_decoding :: proc(header, body: string) -> string {
 	return body
 }
 
-search_result_parse :: proc(body: string) {
-
+search_result_parse :: proc(body: string) -> string {
 	doc := html.parse(body)
+
+	builder: strings.Builder
 
 	print("node iterator from doc")
 	doc_iter := html.node_iterator_from_document(doc)
@@ -253,40 +308,50 @@ search_result_parse :: proc(body: string) {
 			}
 
 			if found_result {
-				fmt.print("(")
+				fmt.sbprint(&builder, "(")
 				for subitem in item.children {
 					if text, ok := subitem.(html.Node_Text); ok {
-						fmt.print(text.text)
+						fmt.sbprint(&builder, text.text)
 					}
 					if link, ok := subitem.(html.Node_Tag); ok {
-						fmt.println("\nSubtag:", link)
+						fmt.sbprintln(&builder, "\nSubtag:", link)
 					}
 				}
-				fmt.print(")")
+				fmt.sbprint(&builder, ")")
 				continue
 			}
 
 			if found_result_url {
 				for subitem in item.children {
 					if text, ok := subitem.(html.Node_Text); ok {
-						fmt.print("[https://", strings.trim_space(text.text), "]", sep = "")
+						fmt.sbprint(
+							&builder,
+							"[https://",
+							strings.trim_space(text.text),
+							"]",
+							sep = "",
+						)
 					}
 					if link, ok := subitem.(html.Node_Tag); ok {
-						fmt.println("\nSubtag:", link)
+						fmt.sbprintln(&builder, "\nSubtag:", link)
 					}
 				}
-				fmt.println()
-				fmt.println()
+				fmt.sbprintln(&builder)
+				fmt.sbprintln(&builder)
 				continue
 			}
 
 		case html.Node_Text:
+		// already handled
 		}
 	}
+
+	return strings.to_string(builder)
 }
 
 
 display_inner_text_nodes :: proc(
+	builder: ^strings.Builder,
 	doc_iter: ^html.Node_Iterator,
 	parent: html.Node_Tag,
 	nested := false, // if this function is called on a node who's children were not yet added to the stack
@@ -300,20 +365,20 @@ display_inner_text_nodes :: proc(
 		switch v in item {
 		case html.Node_Text:
 			text := strings.trim_space(v.text)
-			if text != "" do fmt.print(text)
+			if text != "" do fmt.sbprint(builder, text)
 		case html.Node_Tag:
 			switch v.name {
 			// text nodes
 			case "b", "i":
-				fmt.print(" ")
-				display_inner_text_nodes(doc_iter, v, true)
-				fmt.print(" ")
+				fmt.sbprint(builder, " ")
+				display_inner_text_nodes(builder, doc_iter, v, true)
+				fmt.sbprint(builder, " ")
 			// link
 			case "a":
-				display_link_node(doc_iter, v, true)
+				display_link_node(builder, doc_iter, v, true)
 
 			case "br":
-				fmt.println("")
+				fmt.sbprintln(builder)
 			case:
 				fmt.panicf(
 					"Unhandled child tag in inner_text_node: %v \n parrent tag: %v\n parrent children:%v",
@@ -327,12 +392,13 @@ display_inner_text_nodes :: proc(
 }
 
 display_link_node :: proc(
+	builder: ^strings.Builder,
 	doc_iter: ^html.Node_Iterator,
 	v: html.Node_Tag,
 	nested := false, // if this function is called on a node who's children were not yet added to the stack
 ) {
 	fmt.print("(")
-	display_inner_text_nodes(doc_iter, v, nested)
+	display_inner_text_nodes(builder, doc_iter, v, nested)
 	fmt.print(")")
 	for attr in v.attributes {
 		// TODO: handle relative links and nofallow as well
@@ -340,8 +406,10 @@ display_link_node :: proc(
 	}
 }
 
-response_parse :: proc(body: string) {
+response_parse :: proc(body: string) -> string {
 	doc := html.parse(body)
+
+	builder: strings.Builder
 
 	doc_iter := html.node_iterator_from_document(doc)
 
@@ -350,37 +418,36 @@ response_parse :: proc(body: string) {
 		case html.Node_Tag:
 			switch v.name {
 			case "title":
-				fmt.print("Title: ")
-				display_inner_text_nodes(&doc_iter, v)
+				fmt.sbprint(&builder, "Title: ")
+				display_inner_text_nodes(&builder, &doc_iter, v)
 
-				fmt.println()
+				fmt.sbprintln(&builder)
 			case "h":
-				/*"h1", "h2", "h3", "h4", "h5" are all parsed as h*/
-				fmt.print("\n\n# ")
-				display_inner_text_nodes(&doc_iter, v)
+				fmt.sbprint(&builder, "\n\n# ")
+				display_inner_text_nodes(&builder, &doc_iter, v)
 			case "p":
-				fmt.println()
-				display_inner_text_nodes(&doc_iter, v)
+				fmt.sbprintln(&builder)
+				display_inner_text_nodes(&builder, &doc_iter, v)
 			case "a":
-				display_link_node(&doc_iter, v)
+				display_link_node(&builder, &doc_iter, v)
 			case "b":
-				display_inner_text_nodes(&doc_iter, v)
+				display_inner_text_nodes(&builder, &doc_iter, v)
 
 			case "img":
 				for attr in v.attributes {
 					if attr.name == "name" {
-						fmt.print("img:", attr.value)
+						fmt.sbprint(&builder, "img:", attr.value)
 					}
 				}
 			case "ul":
-				fmt.println("TABLE:")
+				fmt.sbprintln(&builder, "TABLE:")
 				for child in v.children {
 					switch child_v in child {
 					case html.Node_Tag:
 						if child_v.name == "li" {
-							fmt.print("- ")
-							display_inner_text_nodes(&doc_iter, child_v)
-							fmt.println()
+							fmt.sbprint(&builder, "- ")
+							display_inner_text_nodes(&builder, &doc_iter, child_v)
+							fmt.sbprintln(&builder)
 							continue
 						}
 						fmt.panicf(
@@ -395,14 +462,14 @@ response_parse :: proc(body: string) {
 
 				}
 			case "ol":
-				fmt.println("List:")
+				fmt.sbprintln(&builder, "List:")
 				for child, i in v.children {
 					switch child_v in child {
 					case html.Node_Tag:
 						if child_v.name == "li" {
-							fmt.print(i + 1)
-							display_inner_text_nodes(&doc_iter, child_v)
-							fmt.println()
+							fmt.sbprint(&builder, i + 1)
+							display_inner_text_nodes(&builder, &doc_iter, child_v)
+							fmt.sbprintln(&builder)
 							continue
 						}
 						fmt.panicf(
@@ -421,7 +488,7 @@ response_parse :: proc(body: string) {
 			case "script", "style", "noscript":
 				for _ in v.children {pop_safe(&doc_iter.stack)}
 			case "div":
-				fmt.print(" ")
+				fmt.sbprint(&builder, " ")
 			case:
 				// ignore
 				print("ignored tag:", v.name)
@@ -429,11 +496,12 @@ response_parse :: proc(body: string) {
 
 		case html.Node_Text:
 			text := strings.trim_space(v.text)
-			if text != "" do fmt.print(text)
+			if text != "" do fmt.sbprint(&builder, text)
 		}
 
 	}
 
+	return strings.to_string(builder)
 }
 
 buff: [1024 * 1024]u8
