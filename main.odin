@@ -9,6 +9,15 @@ import "core:strings"
 import html "odin-html"
 import ossl "odin-http/openssl"
 
+when ODIN_DEBUG {
+	printf :: fmt.printfln
+	print :: fmt.println
+} else {
+	nop :: proc(args: ..any) {}
+	printf :: nop
+	print :: nop
+}
+
 
 main :: proc() {
 
@@ -38,40 +47,82 @@ main :: proc() {
 		url := opt.u
 		hostname: string
 		is_https := true
+		body: string
 
-		if url[:len(https)] == https {
-			is_https = true
-			hostname = url[len(https):]
-		} else if url[:len(http)] == http {
-			is_https = false
-			hostname = url[len(http):]
-		} else {
-			// default to https
-			hostname = url
+		outer: for {
+			if url[:len(https)] == https {
+				is_https = true
+				hostname = url[len(https):]
+			} else if url[:len(http)] == http {
+				is_https = false
+				hostname = url[len(http):]
+			} else {
+				// default to https
+				hostname = url
+			}
+
+			endpoint_n := strings.index(hostname, "/")
+			endpoint: string
+			if endpoint_n == -1 {
+				endpoint = ""
+			} else {
+				endpoint = hostname[endpoint_n + 1:]
+				hostname = hostname[:endpoint_n]
+			}
+			print(hostname)
+			print(endpoint)
+
+			if is_https {
+				print("Sending https")
+				response = https_get(hostname, endpoint)
+			} else {
+				print("Sending http")
+				response = http_get(hostname, endpoint)
+			}
+
+			print("\"", response, "\"")
+
+			parts := strings.split(response, "\r\n\r\n")
+			header := parts[0]
+			body = parts[1]
+
+			// outer: for {
+			// <url parsing>
+			// ...
+			inner: for line in strings.split_lines_iterator(&header) {
+				http_tag :: "HTTP/1.1 "
+				if len(line) >= len(http_tag) && line[:len(http_tag)] == http_tag {
+					printf(
+						"Found http tag:%v \n|%v|%v|",
+						line,
+						line[:len(http_tag)],
+						line[len(http_tag):],
+					)
+
+					if line[len(http_tag):][:1] != "3" {
+						print("Not a redirect")
+						break outer
+					} else {
+						print("Definetly a redirect")
+					}
+				}
+
+
+				location_tag :: "Location: "
+				if len(line) >= len(location_tag) && line[:len(location_tag)] == location_tag {
+					printf(
+						"Found location tag:%v \n|%v|%v|",
+						line,
+						line[:len(location_tag)],
+						line[len(location_tag):],
+					)
+					url = strings.trim_space(line[len(location_tag):])
+					break inner
+				}
+			}
+
+			fmt.println("Reddirecting to [", url, "] ...")
 		}
-
-		endpoint_n := strings.index(hostname, "/")
-		endpoint: string
-		if endpoint_n == -1 {
-			endpoint = ""
-		} else {
-			endpoint = hostname[endpoint_n + 1:]
-			hostname = hostname[:endpoint_n]
-		}
-		// fmt.println(hostname)
-		// fmt.println(endpoint)
-
-		if is_https {
-			fmt.println("Sending https")
-			response = https_get(hostname, endpoint)
-		} else {
-			fmt.println("Sending http")
-			response = http_get(hostname, endpoint)
-		}
-
-		fmt.println("\"", response, "\"")
-
-		body := strings.split(response, "\r\n\r\n")[1]
 		response_parse(body)
 
 	} else if opt.s != "" {
@@ -92,7 +143,7 @@ search_result_parse :: proc(body: string) {
 
 	doc := html.parse(body)
 
-	// fmt.println("node iterator from doc")
+	print("node iterator from doc")
 	doc_iter := html.node_iterator_from_document(doc)
 	for node in html.node_iterator_depth_first(&doc_iter) {
 		switch item in node {
@@ -232,7 +283,6 @@ response_parse :: proc(body: string) {
 				}
 			case "ul":
 				fmt.println("TABLE:")
-				// fmt.printfln("%#v", v.children)
 				for child in v.children {
 					switch child_v in child {
 					case html.Node_Tag:
@@ -255,7 +305,6 @@ response_parse :: proc(body: string) {
 				}
 			case "ol":
 				fmt.println("List:")
-				// fmt.printfln("%#v", v.children)
 				for child, i in v.children {
 					switch child_v in child {
 					case html.Node_Tag:
@@ -283,8 +332,8 @@ response_parse :: proc(body: string) {
 			case "div":
 				fmt.print(" ")
 			case:
-			// ignore
-			// fmt.println("ignored tag:", v.name)
+				// ignore
+				print("ignored tag:", v.name)
 			}
 
 		case html.Node_Text:
@@ -305,7 +354,7 @@ https_get :: proc(hostname, endpoint: string) -> (response: string) {
 		port     = 443,
 	}
 
-	// fmt.println("Dialing tcp at ", host)
+	print("Dialing tcp at ", host)
 	socket, dial_err := net.dial_tcp_from_host(host)
 	if dial_err != nil {fmt.panicf("dial error: %v", dial_err)}
 	
@@ -322,7 +371,7 @@ https_get :: proc(hostname, endpoint: string) -> (response: string) {
 	// odinfmt: enable
 
 
-	// fmt.println("Setting up tls connection")
+	print("Setting up tls connection")
 	method := ossl.TLS_client_method()
 	ctx := ossl.SSL_CTX_new(method)
 	ssl := ossl.SSL_new(ctx)
@@ -330,7 +379,7 @@ https_get :: proc(hostname, endpoint: string) -> (response: string) {
 	chostname := strings.clone_to_cstring(hostname)
 	ossl.SSL_set_tlsext_host_name(ssl, chostname)
 
-	// fmt.println("Connecting to ssl")
+	print("Connecting to ssl")
 	switch ossl.SSL_connect(ssl) {
 	case 2:
 		fmt.panicf("ssl error: Controlled shutdown")
@@ -341,7 +390,7 @@ https_get :: proc(hostname, endpoint: string) -> (response: string) {
 
 	to_write := len(request)
 	for to_write > 0 {
-		// fmt.println("writing to ssl")
+		print("writing to ssl")
 		ret := ossl.SSL_write(ssl, raw_data(request), c.int(to_write))
 		if ret <= 0 {fmt.panicf("ssl error: write failed")}
 
@@ -354,7 +403,6 @@ https_get :: proc(hostname, endpoint: string) -> (response: string) {
 		bytes_read = ossl.SSL_read(ssl, raw_data(buff[:]), len(buff))
 		if bytes_read <= 0 do break
 		strings.write_bytes(&response_builder, buff[:bytes_read])
-		fmt.println(strings.to_string(response_builder))
 	}
 	return strings.to_string(response_builder)
 }
@@ -366,7 +414,7 @@ http_get :: proc(hostname: string, endpoint: string) -> string {
 		port     = 80,
 	}
 
-	// fmt.println("Dialing tcp at ", host)
+	print("Dialing tcp at ", host)
 	socket, dial_err := net.dial_tcp_from_host(host)
 	if dial_err != nil {fmt.panicf("dial error: %v", dial_err)}
 
@@ -379,11 +427,11 @@ http_get :: proc(hostname: string, endpoint: string) -> string {
 		host.hostname,
 	)
 
-	// fmt.printfln("Sending tcp request:\n%s", request)
+	printf("Sending tcp request:\n%s", request)
 	_, send_err := net.send_tcp(socket, request)
 	if send_err != nil {fmt.panicf("send error: %v", send_err)}
 
-	// fmt.println("Recieving tcp response")
+	print("Recieving tcp response")
 	n, recv_err := net.recv_tcp(socket, buff[:])
 	if recv_err != nil {fmt.panicf("recv error: %v", recv_err)}
 	if n <= 0 {panic("got nothing from request")}
