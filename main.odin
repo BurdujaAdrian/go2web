@@ -9,8 +9,6 @@ import "core:strings"
 import html "odin-html"
 import ossl "odin-http/openssl"
 
-page: string = #load("./hello.html")
-test: string = #load("./test2.html")
 
 main :: proc() {
 
@@ -63,8 +61,15 @@ main :: proc() {
 		// fmt.println(hostname)
 		// fmt.println(endpoint)
 
-		if is_https do response = https_get(hostname, endpoint)
-		else do response = http_get(hostname, endpoint)
+		if is_https {
+			fmt.println("Sending https")
+			response = https_get(hostname, endpoint)
+		} else {
+			fmt.println("Sending http")
+			response = http_get(hostname, endpoint)
+		}
+
+		fmt.println("\"", response, "\"")
 
 		body := strings.split(response, "\r\n\r\n")[1]
 		response_parse(body)
@@ -309,25 +314,13 @@ https_get :: proc(hostname, endpoint: string) -> (response: string) {
 		"GET /%v HTTP/1.1\r\n"+
 		"Host: %s\r\n"+ 
 		"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 OPR/128.0.0.0\r\n" + 
+		"Connection: close\r\n"+
 		"\r\n",
 		endpoint,
 		host.hostname,
 	)
 	// odinfmt: enable
 
-	// // odinfmt: disable
-	// request := transmute([]u8)fmt.aprintf(
-	// 	"GET /%v HTTP/1.1\r\n" +
-	// 	"Host: %s\r\n" +
-	// 	"User-Agent: Mozilla/5.0\r\n" +
-	// 	// "Connection: keep-alive\r\n" +
-	// 	"\r\n",
-	// 	endpoint,
-	// 	host.hostname,
-	// )
-	// odinfmt: enable
-
-	// fmt.printfln("Sending tcp request:\n%s", request)
 
 	// fmt.println("Setting up tls connection")
 	method := ossl.TLS_client_method()
@@ -355,9 +348,15 @@ https_get :: proc(hostname, endpoint: string) -> (response: string) {
 		to_write -= int(ret)
 	}
 
-	response_size := ossl.SSL_read(ssl, raw_data(buff[:]), len(buff))
-
-	return transmute(string)buff[:response_size]
+	response_builder: strings.Builder
+	bytes_read: i32
+	for {
+		bytes_read = ossl.SSL_read(ssl, raw_data(buff[:]), len(buff))
+		if bytes_read <= 0 do break
+		strings.write_bytes(&response_builder, buff[:bytes_read])
+		fmt.println(strings.to_string(response_builder))
+	}
+	return strings.to_string(response_builder)
 }
 
 http_get :: proc(hostname: string, endpoint: string) -> string {
@@ -372,7 +371,10 @@ http_get :: proc(hostname: string, endpoint: string) -> string {
 	if dial_err != nil {fmt.panicf("dial error: %v", dial_err)}
 
 	request := transmute([]u8)fmt.aprintf(
-		"GET /%v HTTP/1.1\r\nHost: %s\r\n" + "User-Agent: Mozilla/5.0\r\n" + "\r\n",
+		"GET /%v HTTP/1.1\r\nHost: %s\r\n" +
+		"User-Agent: Mozilla/5.0\r\n" +
+		"Connection: close\r\n" +
+		"\r\n",
 		endpoint,
 		host.hostname,
 	)
