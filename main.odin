@@ -1,10 +1,13 @@
 package main
 
+import "core:bytes"
 import "core:c"
+import "core:compress/gzip"
 import "core:flags"
 import "core:fmt"
 import "core:net"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 import html "odin-html"
 import ossl "odin-http/openssl"
@@ -22,8 +25,8 @@ when ODIN_DEBUG {
 main :: proc() {
 
 	Options :: struct {
-		u: string `args:"pos=0" usage:"makes an HTTP request to the specified URL and print the response"`,
-		s: string ` usage:"makes an HTTP request to search the term using your favorite search engine and print top 10 results"`,
+		u: string `usage:"makes an HTTP request to the specified URL and print the response"`,
+		s: string `usage:"makes an HTTP request to search the term using your favorite search engine and print top 10 results"`,
 		// INFO: already implemented by deffault
 		// h: bool `usage:"shows this help"`,
 		// help: bool `usage:"shows this help"`,
@@ -32,6 +35,15 @@ main :: proc() {
 	opt: Options
 	style := flags.Parsing_Style.Odin
 
+	checker :: proc(model: rawptr, name: string, value: any, args_tag: string) -> string {
+		opts := cast(^Options)model
+		if opts.u != "" && opts.s != "" {
+			return "Flags -s and -u are mutually exclusive"
+		}
+		return ""
+	}
+
+	flags.register_flag_checker(checker)
 	flags.parse_or_exit(&opt, os.args, style)
 
 
@@ -47,6 +59,7 @@ main :: proc() {
 		url := opt.u
 		hostname: string
 		is_https := true
+		header: string
 		body: string
 
 		outer: for {
@@ -80,26 +93,16 @@ main :: proc() {
 				response = http_get(hostname, endpoint)
 			}
 
-			print("\"", response, "\"")
-
 			parts := strings.split(response, "\r\n\r\n")
-			header := parts[0]
+			header = parts[0]
 			body = parts[1]
 
-			// outer: for {
-			// <url parsing>
-			// ...
 			inner: for line in strings.split_lines_iterator(&header) {
 				http_tag :: "HTTP/1.1 "
-				if len(line) >= len(http_tag) && line[:len(http_tag)] == http_tag {
-					printf(
-						"Found http tag:%v \n|%v|%v|",
-						line,
-						line[:len(http_tag)],
-						line[len(http_tag):],
-					)
+				if len(line) >= len(http_tag) do if line[:len(http_tag)] == http_tag {
+					printf("Found http tag:%v \n|%v|%v|", line, line[:len(http_tag)], line[len(http_tag):])
 
-					if line[len(http_tag):][:1] != "3" {
+					if line[len(http_tag):][:1] != "3" && line[len(http_tag):][:3] != "300" {
 						print("Not a redirect")
 						break outer
 					} else {
@@ -109,13 +112,8 @@ main :: proc() {
 
 
 				location_tag :: "Location: "
-				if len(line) >= len(location_tag) && line[:len(location_tag)] == location_tag {
-					printf(
-						"Found location tag:%v \n|%v|%v|",
-						line,
-						line[:len(location_tag)],
-						line[len(location_tag):],
-					)
+				if len(line) >= len(location_tag) do if line[:len(location_tag)] == location_tag {
+					printf("Found location tag:%v \n|%v|%v|", line, line[:len(location_tag)], line[len(location_tag):])
 					url = strings.trim_space(line[len(location_tag):])
 					break inner
 				}
@@ -123,6 +121,9 @@ main :: proc() {
 
 			fmt.println("Reddirecting to [", url, "] ...")
 		}
+
+		print("Decoding...", header)
+		body = content_decoding(header, body)
 		response_parse(body)
 
 	} else if opt.s != "" {
@@ -134,9 +135,99 @@ main :: proc() {
 		response = https_get(hostname, endpoint)
 
 		// html based search engine api
-		search_result_parse(response)
+		parts := strings.split(response, "\r\n\r\n")
+		header := parts[0]
+		body := parts[1]
+
+		print("Decoding...", header)
+		body = content_decoding(header, body)
+		search_result_parse(body)
 	}
 
+}
+
+content_decoding :: proc(header, body: string) -> string {
+	header := header
+	body := body
+	encoding_list: [dynamic]string
+	is_chunked: bool = false
+
+	gzip_tag :: "gzip"
+
+	encoding_field :: "Content-Encoding: "
+	encoding_flen :: len(encoding_field)
+
+	chuncked_tag :: "chunked"
+	chuncked_flen :: len(chuncked_tag)
+
+	transfer_field :: "Transfer-Encoding: "
+	transfer_flen :: len(transfer_field)
+
+	for line in strings.split_lines_iterator(&header) {
+		if len(line) >= encoding_flen do if line[:encoding_flen] == encoding_field {
+			encodings := strings.split(line[encoding_flen:], ",")
+			for encoding in encodings {
+				encoding := strings.trim_space(encoding)
+				append(&encoding_list, encoding)
+			}
+		}
+
+		if len(line) >= transfer_flen do if line[:transfer_flen] == transfer_field {
+			if line[transfer_flen:][:chuncked_flen] == chuncked_tag {
+				is_chunked = true
+			}
+		}
+	}
+
+
+	if is_chunked {
+		print("Decoding chunks")
+		chunks_buffer: bytes.Buffer
+		rest := transmute([]u8)body
+		for {
+			idx := bytes.index(rest, []byte{'\r', '\n'})
+			if idx == -1 {
+				// no more clrf's
+				break
+			}
+
+			chunck_size, ok := strconv.parse_uint(transmute(string)rest[:idx], 16)
+			if !ok do fmt.panicf("Can't parse int in chuncks, idx:%v; chunck:%s", idx, rest[:idx - 2])
+
+			// last chunk
+			if chunck_size == 0 do break
+
+			rest = rest[idx + 2:] //skip clrf
+
+			n, _ := bytes.buffer_write(&chunks_buffer, rest[:chunck_size])
+			if n != cast(int)chunck_size do panic("Couldn't write the whole chunk")
+
+			rest = rest[chunck_size + 2:]
+		}
+
+		body = bytes.buffer_to_string(&chunks_buffer)
+	}
+
+	if len(encoding_list) > 0 {
+		for enc in encoding_list {
+			switch enc {
+			case gzip_tag:
+				print("Attempting to unzip using gzip")
+				bytes_buffer: bytes.Buffer
+				if err := gzip.load_from_bytes(transmute([]byte)body, &bytes_buffer); err != nil {
+					fmt.panicf("%v", err)
+				}
+
+				body = bytes.buffer_to_string(&bytes_buffer)
+			case:
+				return fmt.aprintfln("Encoding %s not supported", enc)
+
+			}
+
+		}
+	}
+
+	return body
 }
 
 search_result_parse :: proc(body: string) {
@@ -357,19 +448,8 @@ https_get :: proc(hostname, endpoint: string) -> (response: string) {
 	print("Dialing tcp at ", host)
 	socket, dial_err := net.dial_tcp_from_host(host)
 	if dial_err != nil {fmt.panicf("dial error: %v", dial_err)}
-	
-	// odinfmt: disable
-	request := transmute([]u8)fmt.aprintf(
-		"GET /%v HTTP/1.1\r\n"+
-		"Host: %s\r\n"+ 
-		"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 OPR/128.0.0.0\r\n" + 
-		"Connection: close\r\n"+
-		"\r\n",
-		endpoint,
-		host.hostname,
-	)
-	// odinfmt: enable
 
+	request := format_request(endpoint, hostname)
 
 	print("Setting up tls connection")
 	method := ossl.TLS_client_method()
@@ -418,14 +498,7 @@ http_get :: proc(hostname: string, endpoint: string) -> string {
 	socket, dial_err := net.dial_tcp_from_host(host)
 	if dial_err != nil {fmt.panicf("dial error: %v", dial_err)}
 
-	request := transmute([]u8)fmt.aprintf(
-		"GET /%v HTTP/1.1\r\nHost: %s\r\n" +
-		"User-Agent: Mozilla/5.0\r\n" +
-		"Connection: close\r\n" +
-		"\r\n",
-		endpoint,
-		host.hostname,
-	)
+	request := format_request(endpoint, hostname)
 
 	printf("Sending tcp request:\n%s", request)
 	_, send_err := net.send_tcp(socket, request)
@@ -437,4 +510,23 @@ http_get :: proc(hostname: string, endpoint: string) -> string {
 	if n <= 0 {panic("got nothing from request")}
 
 	return transmute(string)buff[:n]
+}
+
+format_request :: proc(endpoint, hostname: string) -> []u8 {
+	
+	// odinfmt: disable
+	request := transmute([]u8)fmt.aprintf(
+		"GET /%v HTTP/1.1\r\n"+
+		"Host: %s\r\n"+ 
+		"User-Agent: PostmanRuntime/7.52.0\r\n" + 
+		"Accept-Encoding: gzip\r\n"+
+		"Accept: */*\r\n"+
+		"Connection: close\r\n"+
+		"\r\n",
+		endpoint,
+		hostname,
+	)
+	// odinfmt: enable
+
+	return request
 }
