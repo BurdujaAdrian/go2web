@@ -14,6 +14,8 @@ import "core:time"
 import html "odin-html"
 import ossl "odin-http/openssl"
 
+MAX_REDIRECTS :: 10
+
 when ODIN_DEBUG {
 	printf :: fmt.printfln
 	print :: fmt.println
@@ -70,7 +72,7 @@ main :: proc() {
 		body: string
 
 
-		outer: for {
+		outer: for _ in 0 ..< MAX_REDIRECTS {
 			if url[:len(https)] == https {
 				is_https = true
 				hostname = url[len(https):]
@@ -122,7 +124,13 @@ main :: proc() {
 				location_tag :: "Location: "
 				if len(line) >= len(location_tag) do if line[:len(location_tag)] == location_tag {
 					printf("Found location tag:%v \n|%v|%v|", line, line[:len(location_tag)], line[len(location_tag):])
-					url = strings.trim_space(line[len(location_tag):])
+
+					new_url := strings.trim_space(line[len(location_tag):])
+					if new_url[0] == '/' {
+						url = fmt.aprint(hostname, new_url, sep = "")
+					} else {
+						url = new_url
+					}
 					break inner
 				}
 			}
